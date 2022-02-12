@@ -1,1 +1,5 @@
 sample*
+.sudoku-solvr/
+dataset/
+.ipynb_checkpoints/
+grid.jpg

@@ -1,28 +1,36 @@
 import cv2, operator
 import numpy as np
-import matplotlib.pyplot as plt
-from keras.models import load_model
+from tensorflow.keras.models import load_model
 import sys
-
-
-MORPH_FILTER = True
-file_name = sys.argv[1]
-model_name = sys.argv[2]
+MODEL_FILE = sys.argv[2]
+INPUT_FILE = sys.argv[1]
 
 #process the image after loading the image from disk
 def preprocess_img(img):
+    "converts image to grayscale, resizes it and applies adaptive threshold to clean the image"
+    
+    #Parameters:
+    # img (numpy.ndarray):input image
+    
+    #Returns:
+    # processed (numpy.ndarray):Processed Array
     gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, (700, 700)) 
     gray = cv2.GaussianBlur(gray, (5,5), 0)
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    return thresh
-
-#get corners of sudoku grid
+    processed = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 6)
+    return processed
 
 def find_corners_of_largest_polygon(img):
     """Finds the 4 extreme corners of the largest contour in the image."""
+    
+    #Parameters:
+    # img (numpy.ndarray):input image
+    
+    #Returns:
+    # corner (list(numpy.ndarray)):Corners of Sudoku Grid
+    
     contours = cv2.findContours(img.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # Find contours
-    polygon = max(contours[1], key=cv2.contourArea)  # Sort by area, descending
+    polygon = max(contours[0], key=cv2.contourArea)  # Sort by area, descending
     
     bottom_right, _ = max(enumerate([pt[0][0] + pt[0][1] for pt in polygon]), key=operator.itemgetter(1))
     top_left, _ = min(enumerate([pt[0][0] + pt[0][1] for pt in polygon]), key=operator.itemgetter(1))
@@ -32,7 +40,6 @@ def find_corners_of_largest_polygon(img):
 
 
     return [polygon[top_left][0], polygon[top_right][0], polygon[bottom_right][0], polygon[bottom_left][0]]
-# print(find_corners_of_largest_polygon(processed))
 
 #crop and warp
 def distance_between(p1, p2):
@@ -42,7 +49,14 @@ def distance_between(p1, p2):
     return np.sqrt((a ** 2) + (b ** 2))
 def crop_and_warp(img, crop_rect):
     """Crops and warps a rectangular section from an image into a square of similar size."""
-
+    
+    #Parameters:
+    # img (numpy.ndarray):input image
+    # crop_rect (tuple):coordinates of all 4 corners of rectangle
+    
+    #Returns:
+    # warpedImage (numpy.ndarray):returns transformed image
+    
     # Rectangle described by top left, top right, bottom right and bottom left points
     top_left, top_right, bottom_right, bottom_left = crop_rect[0], crop_rect[1], crop_rect[2], crop_rect[3]
 
@@ -67,20 +81,26 @@ def crop_and_warp(img, crop_rect):
     return cv2.warpPerspective(img, m, (int(side), int(side)))
 
 
-#get squares on the grid
-def getMeanBrightness(cropped_img, row_loc):
-    return np.mean(cropped_img[row_loc,:])
-
-def getGridSquares(cropped_img,THRESHOLD_1):
+# Get squares on grid
+def getGridCells(cropped_img,THRESHOLD):
+    "Find lines on the sudoku grid"
+    
+    #Parameters:
+    # cropped_img (numpy.ndarray):input image
+    # THRESHOLD (float):used to define tolerance for autocorrecting line position, it could be high for distorted cropped_image
+    
+    #Returns:
+    # cells (list(tuple)):list of tuple containing top left and bottom right coord of cells
+    
     width, height = cropped_img.shape
     row_distance = height/9
     column_distance = width/9
     rows_line = []
     for i in range(10):
-        line1 = min(int(i*row_distance),cropped_img.shape[0]-1-THRESHOLD_1)
+        line1 = min(int(i*row_distance),width-1-THRESHOLD)
         corrected_line = line1
         maxi_val = np.mean(cropped_img[line1,:])
-        for j in range(max(line1-THRESHOLD_1,0),line1+THRESHOLD_1):
+        for j in range(max(line1-THRESHOLD,0),line1+THRESHOLD):
             mn_val = np.mean(cropped_img[j,:])
             if(mn_val>maxi_val):
                 corrected_line = j
@@ -89,10 +109,10 @@ def getGridSquares(cropped_img,THRESHOLD_1):
         rows_line.append(corrected_line)
     cols_line = []
     for i in range(10):
-        line1 = min(int(i*column_distance),cropped_img.shape[1]-1-THRESHOLD_1)
+        line1 = min(int(i*column_distance),cropped_img.shape[1]-1-THRESHOLD)
         corrected_line = line1
         maxi_val = np.mean(cropped_img[:,line1])
-        for j in range(max(line1-THRESHOLD_1,0),line1+THRESHOLD_1):
+        for j in range(max(line1-THRESHOLD,0),line1+THRESHOLD):
             mn_val = np.mean(cropped_img[:,j])
             if(mn_val>maxi_val):
                 corrected_line = j
@@ -105,105 +125,114 @@ def getGridSquares(cropped_img,THRESHOLD_1):
             squares.append(sq)
     return squares
 
-#get numbered cells
+def cleanCell(cellImage,color_to_fill,replace_with_color):
+    "Applies flood fill to clean cell image (removes residual rows and cols lines)"
+    #Parameters:
+    # cellImage (numpy.ndarray):cell image
+    # color_to_fill (int):noise color
+    # replace_with_color (int):color to replace with
+    
+    #Returns:
+    # image (numpy.ndarray):cleaned image
+    h, w = cellImage.shape[:2]
+    im_floodfill = cellImage.copy()
+    for i in range(w-1):
+        if(im_floodfill[0][i]==color_to_fill):
+            cv2.floodFill(im_floodfill, None, (i,0), replace_with_color);
+    for i in range(h-1):
+        if(im_floodfill[i][0]==color_to_fill):
+            cv2.floodFill(im_floodfill, None, (0,i), replace_with_color);
+    return im_floodfill
+
 def get_filled_cells(image,cells, crop_factor, threshold):
+    #find cells which contains prefilled values
+    
+    #Parameters:
+    # image (numpy.ndarray):Image on which prefilled cells are to be identified
+    # crop_factor (float):Value between 0 and 0.5 for which cell dimensions are to be cropped
+    # cells (list):List of cells (position) in sudoku matrix
+    # threshold (float):Value which is used to identify prefilled cells. Mean brightness of empty cell should be less than threshold and for filled cell it should be greater
+    
+    #Returns:
+    # PrefilledCells (tuple):return tuple pair for cell dimenstions and cell index in cells array
+    
     cell_pos = []
     selected = []
     for i, cell in enumerate(cells):
         tmp_thresh = int((cell[1][1] - cell[0][1])*crop_factor)
         newIm = cropped[cell[0][1]+tmp_thresh:cell[1][1]-tmp_thresh,cell[0][0]+tmp_thresh:cell[1][0]-tmp_thresh]
-        newIm = processCrop(newIm,150)
-        if(np.mean(newIm)>threshold):
+        
+        proccessedIm = cleanCell(newIm,255,0)
+        
+        if(np.mean(proccessedIm)>threshold):
             selected.append(cell)
             cell_pos.append(i)
     return (selected, cell_pos)
 
-#processing individual cells to remove gridline artifact
-def processCrop(image,threshold):
-    #horizontals
-    last_line = image[image.shape[0]-1,:]
-    min_mean = np.mean(last_line)
-    b = 1
-    while(min_mean>threshold):
-        b+=1
-        last_line = image[image.shape[0]-b,:]
-        min_mean = np.mean(last_line)
-    top_line = image[0,:]
-    min_mean = np.mean(top_line)
-    t = 0
-    while(min_mean>threshold):
-        t+=1
-        top_line = image[t,:]
-        min_mean = np.mean(top_line)
-        
-    left_line = image[:,0]
-    min_mean = np.mean(left_line)
-    l = 0
-    while(min_mean>threshold):
-        l+=1
-        left_line = image[:,l]
-        min_mean = np.mean(left_line)
-    right_line = image[:,image.shape[1]-1]
-    min_mean = np.mean(right_line)
-    r = 1
-    while(min_mean>threshold):
-        r+=1
-        right_line = image[:,image.shape[1]-r]
-        min_mean = np.mean(right_line)
-    newImg = image[t:image.shape[0]-b,l:image.shape[1]-r]
-    return newImg
-
 #Main script - creates the cropped image objekt
-
+MORPH_FILTER = False
+file_name = INPUT_FILE
 
 img = cv2.imread(file_name)
 processed = preprocess_img(img)
 corners = find_corners_of_largest_polygon(processed)
 cropped = crop_and_warp(processed.copy(), corners)
 
-
 if(MORPH_FILTER):
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(5,5))
     cropped = cv2.morphologyEx(cropped, cv2.MORPH_OPEN, kernel)
 
-squares = getGridSquares(cropped,12)
+squares = getGridCells(cropped,5)
+
+
+pre_filled_cells, cell_pos = get_filled_cells(cropped,squares,0.25,10)
 
 image = cv2.cvtColor(cropped.copy(),cv2.COLOR_GRAY2RGB)
-
-pre_filled_cells, cell_pos = get_filled_cells(cropped,squares,0.25,26)
+for cell in squares:
+    image = cv2.rectangle(image.copy(),cell[0],cell[1],(255,0,0),3)
+for cell in pre_filled_cells:
+    image = cv2.rectangle(image.copy(),cell[0],cell[1],(0,255,0),2)
+cv2.imwrite("grid.jpg",image)
 
 #View the cropped objekt here
 
-def getProcessedCell(image, cell,crop_factor,threshold):
+def getProcessedCell(image, cell,crop_factor):
+    "Cleans cell image (removes artifacts)"
+    #Parameters:
+    # image (numpy.ndarray):sudoku grid
+    # cell (tuple):cell coordinates
+    # crop_factor (float): between 0 and 1, removes fraction of image from edge
+    
+    #Returns:
+    # image (numpy.ndarray):cleaned image
     tmp_thresh = int((cell[1][1] - cell[0][1])*crop_factor)
     newIm = image[cell[0][1]+tmp_thresh:cell[1][1]-tmp_thresh,cell[0][0]+tmp_thresh:cell[1][0]-tmp_thresh]
-    newIm = processCrop(newIm,threshold)
-    return newIm
+    th, im_th = cv2.threshold(newIm, 150, 255, cv2.THRESH_BINARY)
+    im_th = cleanCell(im_th,255,0)
+    return im_th
 
 #Predictions are done here
-
 def predict_array(selected,image,crop_factor):
-#     model1 = load_model("model3.h5")
-    model = load_model(model_name)
+    "Predict numbers from cell array"
+    #Parameters:
+    # selected (list(tuple)):cells (pos) array
+    # image (numpy.ndarray):sudoku grid image
+    
+    #Returns:
+    # result (tuple):prediction and corresponding cell image
+    model = load_model(MODEL_FILE)
     data = []
     for cell in selected:
-        tmp_thresh = int((cell[1][1] - cell[0][1])*crop_factor)
-        
-        newIm = image[cell[0][1]+tmp_thresh:cell[1][1]-tmp_thresh,cell[0][0]+tmp_thresh:cell[1][0]-tmp_thresh]
-        newIm = processCrop(newIm,150)
+        newIm = getProcessedCell(image,cell,crop_factor)
         resized_im = cv2.resize(newIm, (28, 28),  
                interpolation = cv2.INTER_NEAREST)
-        data.append((resized_im/255).reshape((28,28,1)))
+        data.append((resized_im).reshape((28,28,1))/255)
+    
     data = np.array(data)
-#     predictions1 = model1.predict(data)
-    predictions = model.predict(np.array(data))
-#     net_predictions = (predictions1+predictions2)/2
+    predictions = model.predict(data)
     
     return (predictions, data)
-
-        
-    
-result, data = predict_array(pre_filled_cells,cropped,0.10)
+(result, data) = predict_array(pre_filled_cells,cropped,0.05)
 
 #digitized array is created here
 digitized = [
@@ -213,9 +242,20 @@ for pos, res in zip(cell_pos,result):
     y_cord = pos//9
     x_cord = pos-y_cord*9
     digitized[y_cord][x_cord] = np.argmax(res)+1
-    
+
+
 #Solution is computed here
 def checkValidity(arr, i, j, val):
+    "checks if number to be placed is valid in sudoku grid"
+    
+    #Parameters:
+    # arr (list):sudoku grid (digital)
+    # i (int):row index
+    # j (int):col index
+    # val (int): number to be checked
+    
+    #Returns:
+    # result (boolean):True or False
     baseI = (i//3)*3
     baseJ = (j//3)*3
     for _i in range(baseI,baseI+3):
@@ -231,6 +271,15 @@ def checkValidity(arr, i, j, val):
     return True
 
 def solve(arr, i,j):
+    "Solves sudoku grid in place"
+    
+    #Parameters:
+    # arr (list):sudoku grid array (digital)
+    # i (int):row index
+    # j (int):col index
+    
+    #Returns:
+    # result (boolean):True if grid solved else false
     
     if(i>8):
         i=0
@@ -290,6 +339,4 @@ for _i_ in range(700):
             fnl_img[_i_][_j_][0] = base_img[_i_][_j_][0]
             fnl_img[_i_][_j_][1] = base_img[_i_][_j_][1]
             fnl_img[_i_][_j_][2] = base_img[_i_][_j_][2]
-cv2.imwrite("output.png",cv2.resize(fnl_img,(img.shape[1],img.shape[0])))
-
-    
+cv2.imwrite("output.jpg",fnl_img)
